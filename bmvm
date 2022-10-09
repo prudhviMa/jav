@@ -1,0 +1,318 @@
+/*  +++begin copyright+++ *************************************************/
+/*                                                                        */
+/*  BROADRIDGE CONFIDENTIAL INFORMATION: FIRST CLASS                      */
+/*  COPYRIGHT (c)Broadridge Asia Pacific Ltd., Japan Branch  2009         */
+/*                                                                        */
+/*  This  program  contains  confidential  and proprietary  information   */
+/*  of  Broadridge Asia Pacific Ltd., Japan Branch  and  any reproduction,*/ 
+/*  translation, adaptation,  alteration, disclosure  or use in whole or  */
+/*  in part  is expressly prohibited,  except  as  may  be  specifically  */
+/*  authorised by prior written agreement or permission of Broadridge     */
+/*  Asia Pacific Ltd., Japan Branch                                       */
+/*  +++end copyright+++ ***************************************************/
+
+package com.broadridge.dpm.bmvmtproc.api;
+
+import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.HashMap;
+
+import com.broadridge.dpm.api.DPMHandle;
+
+import com.broadridge.dpm.bmvmtproc.udf.MvmtProcUdfGeneric;
+import com.broadridge.dpm.exception.DPMException;
+import com.broadridge.cc.log.BRLogger;
+
+
+/*-------------------------------------------------------------------------
+
+Class Name    : BMvmtProcDPMHandle
+Author        : James Marsden
+Date          : 07-Jul-2013
+Description   : BMvmtProcDPMHandle contains methods customized to bmvmtproc server
+                to access the tables in DPM database
+
+Amendment History
+-----------------
+
+Author             Reference  Date       Description of change
+------             ---------  ----       ---------------------
+James Marsden      brtk01519  07-Jul-13  Written by.
+(RJM)
+
+---------------------------------------------------------------------------*/
+
+public class BMvmtProcDPMHandle extends DPMHandle 
+{
+
+    
+    protected BMvmtProcDPMIOService  bMvmtProcIOService = null;
+    protected String                 myProcessCode      = "";
+    protected String                 myProcessName      = "";
+    protected String                 procCode           = "";
+
+
+    private static final Object lock = new Object();
+    
+
+    public BMvmtProcDPMHandle ()
+    {
+
+    }
+
+    /**
+     * Method Name   : BHostDPMHandle
+     * Returns       : no return type
+     * Method params : String DBType, String DBCode ,int serverId, String processCode, String processName
+     * Method desc   : Constructor
+     * throws excp   : DPMEXception
+     * 
+     */
+    public BMvmtProcDPMHandle(String DBCode, int serverId, String processCode, String processName, String procCode) throws DPMException //brtk00257
+    {
+        super(DBCode, serverId, processName, processCode);
+        this.myProcessCode   = processName;
+        this.myProcessName   = processCode;
+        this.procCode        = procCode;
+        bMvmtProcIOService   = new BMvmtProcDPMIOService(myDBInterface);
+    }
+  
+    /** Method Name  : loadConfigData 
+     *  Returns       : Hashmap of msgrefudf  
+     *  Method params : ConfigRef and ConfigType
+     *  Method desc   : loads the dbcodes,output_type and msg_refs,udf_name's from the config_def table 
+     *  throws excp   : throws DPMException
+     */
+ 
+   /* brtk00687 */
+   public HashMap<String,MvmtProcDefStaticValue> loadMvmtProcStatic(String processCode,int serverId)throws DPMException {
+
+       String                 currStaticKey   = null;
+       MvmtProcDefStaticValue currStaticValue = null;
+       MvmtProcUdfGeneric     udfRefInstance  = null;
+       ArrayList<MvmtProcDefStaticValue> mvmtProcDefValueArrayList = null; 
+       ResultSet rs = null;
+
+       try
+       {
+           /* Load static details from dpm_rule_def */
+
+           rs = bMvmtProcIOService.loadConfigData (procCode);
+           HashMap<String,MvmtProcDefStaticValue> staticMap = null; 
+
+           if (rs == null)
+           {
+               throw new DPMException ("Error in Loading Static : Exception while retrieving resultset from dpm_rule_def");
+
+           } else if(!rs.next())
+           {
+               throw new DPMException ("Error in Loading Static: No rows found in dpm_rule_def for proc code " + procCode );
+           }
+   
+           staticMap = new HashMap<String,MvmtProcDefStaticValue>();
+           mvmtProcDefValueArrayList  = new ArrayList<MvmtProcDefStaticValue>();
+
+           do
+           {
+
+               currStaticKey   = rs.getString("rule_udf_ref").trim();
+                  
+               currStaticValue = new MvmtProcDefStaticValue(rs.getString("rule_name").trim());
+
+               BRLogger.log.info(procCode + " : Loading entry: " + currStaticKey + " " + currStaticValue.toString().trim());
+
+               if(!mvmtProcDefValueArrayList.contains(currStaticValue))
+               {
+                   if (currStaticValue.getUdfRef() != null )
+                   { //if udfref is null for a particular key, no need to create instance
+                       udfRefInstance  = generateUdfRefInstance(currStaticValue);
+                       currStaticValue.setUdfRefInstance(udfRefInstance);
+                   }
+                   mvmtProcDefValueArrayList.add(currStaticValue);
+
+               }else
+               {
+                   //currStaticValue.getUdfRefInstance() would be null here
+                   // just get the existing instance from the arraylist.   
+                   currStaticValue = mvmtProcDefValueArrayList.get(mvmtProcDefValueArrayList.indexOf(currStaticValue));
+                   //now currStaticValue.getUdfRefInstance() will have instance
+               }
+
+               staticMap.put(currStaticKey, currStaticValue);
+
+
+           } while (rs.next());
+
+           return staticMap;
+       }
+       catch (SQLException sqx)
+       {
+           DPMException dpx = new DPMException("Error in Loading Static : Error while loading from dpm_rule_def " +
+                                               bMvmtProcIOService.getSQLExceptionString(sqx));
+           dpx.setStackTrace(sqx.getStackTrace());
+           throw dpx;
+       }
+       finally 
+       {
+           if(rs != null)
+               try {
+                   rs.close();
+               } catch (SQLException e) { 
+               }
+       }
+   }
+   
+    @SuppressWarnings("rawtypes")
+    private MvmtProcUdfGeneric generateUdfRefInstance(MvmtProcDefStaticValue currStaticValue)
+    throws DPMException
+    {
+        
+        Constructor        construct         = null;
+        Class[]            constructorParams = {BMvmtProcDPMHandle.class}; 
+        String             currUDFName       = null;
+        MvmtProcUdfGeneric udfRefInstance    = null;
+        
+        try
+        {
+            
+            currUDFName = "com.broadridge.dpm.bmvmtproc.udf." + currStaticValue.getUdfRef().trim();
+            BRLogger.log.debug(procCode + " : Loading udf: " + currUDFName + ".");
+            construct = Class.forName(currUDFName).getConstructor(constructorParams);
+            
+            udfRefInstance = (MvmtProcUdfGeneric)construct.newInstance(this);
+            
+            return udfRefInstance;
+        }
+        catch(NoSuchMethodException nsmex)
+        {
+            DPMException dpmex = new DPMException("Exception in loading UDFs1 " + nsmex.getMessage());
+            dpmex.setStackTrace(nsmex.getStackTrace());
+            throw dpmex;
+        }
+        catch(InvocationTargetException itex)
+        {
+            DPMException dpmex = new DPMException("Exception in loading UDFs2: " + itex.getCause() );
+            dpmex.setStackTrace(itex.getStackTrace());
+            throw dpmex;
+        }
+        catch(ClassNotFoundException cnfe)
+        {
+            DPMException dpmex = new DPMException("Exception in loading UDFs3 " + cnfe.getMessage());
+            dpmex.setStackTrace(cnfe.getStackTrace());
+            throw dpmex;
+
+        }
+        catch(InstantiationException inste)
+        {
+            DPMException dpmex = new DPMException("Exception in loading UDFs4 " + inste.getMessage());
+            dpmex.setStackTrace(inste.getStackTrace());
+            throw dpmex;
+
+        }
+        catch(IllegalAccessException iaex)
+        {
+            DPMException dpmex = new DPMException("Exception in loading UDFs5 " + iaex.getMessage());
+            dpmex.setStackTrace(iaex.getStackTrace());
+            throw dpmex;
+
+        }
+    }
+    
+    /**
+     * Method Name   : createMyTempTables
+     * Returns       : void
+     * Method params : NONE
+     * Method desc   : Creates all the Required TEMP tables 
+     * throws excp   : DPMException
+     * 
+     */
+    
+    public void createMyTempTables() throws DPMException
+    {
+        createTempTables (myProcessName, "DPM", bMvmtProcIOService);
+    }
+    
+    
+   /**
+     * Method Name   : commitProcRows
+     * Returns       : void
+     * Method params : versionUser
+     * Method desc   : Updates the proc_status to FAIL/DONE/SUPR
+     * throws excp   : DPMException
+     * 
+     */
+    
+    public void commitProcRows (String versionUser, String myProcCode)
+            throws DPMException
+    {
+
+        synchronized(lock)
+        {
+            bMvmtProcIOService.updateBqueStatus(versionUser, myProcCode);
+
+            //pass the temp table names to the truncate method.
+            bMvmtProcIOService.truncateMvmtProcTempTables (getControlDBProps().getProperty("controldatabase"),getDatabaseType(), myProcessName,myProcCode);
+        }
+
+        return;
+    }
+ 
+    /** Method Name   : recoverBqueRows 
+     *  Returns       : void 
+     *  Method params : originIDMap, versionUser 
+     *  Method desc   : Update the status of the polling table to DONE/NQUE from BQUE 
+     *  throws excp   : DPMException
+     */
+    
+    public void recoverBqueRows(int dpmBatchSize,String versionUser, String myProcCode, int dpmServerId) throws DPMException
+    {
+        synchronized(lock)
+        {
+            bMvmtProcIOService.recoverBqueProcRows(dpmBatchSize, versionUser, dpmServerId, myProcCode);
+        }
+    }
+    
+    /** Method Name   : pollNqueRows 
+     *  Returns       : returns the count of NQUE rows 
+     *  Method params : batch size and version_user 
+     *  Method desc   : poll the NQUE notices with destination GLOSS,STAND,DESTINATION
+     *                  and populate the temp table 
+     *  throws excp   : DPMException
+     */
+
+    public int pollNqueRows (String myProcCode, int serverId, int dpmBatchSize, String versionUser) throws DPMException
+    {
+        int returnValue = 0;
+        synchronized(lock)
+        {
+            returnValue = bMvmtProcIOService.pollNqueProcRows (myProcCode, serverId, dpmBatchSize, versionUser);
+        }
+        return returnValue;
+    }
+    
+    public ResultSet executeMyQuery (String query, String procCode) throws DPMException
+    {
+         return bMvmtProcIOService.executeMyQuery (query, procCode);
+    }
+
+    public void executeMyUpdateQuery (String query, String procCode) throws DPMException
+    {
+        synchronized(lock)
+        {
+            bMvmtProcIOService.executeMyUpdateQuery (query, procCode);
+        }
+         return;
+    }
+
+    public boolean callMyDpmApi (String myApiName, String versionUser, String procCode) throws DPMException,SQLException
+    {
+       synchronized(lock)
+       {
+          return bMvmtProcIOService.callMyDpmApi (myApiName, versionUser, procCode);
+       }
+    }
+
+}
